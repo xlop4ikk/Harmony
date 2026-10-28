@@ -16,9 +16,32 @@ const API = (() => {
 
   async function getJSON(path, params) {
     const qs = new URLSearchParams(params).toString();
-    const r = await fetch(url(path) + '?' + qs);
-    if (!r.ok) throw new Error(`Сервер ответил ${r.status}`);
-    return r.json();
+    const r = await fetch(url(path) + '?' + qs, {
+      headers: { Accept: 'application/json' },
+    });
+
+    let data = null;
+    try {
+      data = await r.json();
+    } catch (e) {
+      data = null;
+    }
+
+    if (!r.ok) throw new Error(errorMessage(data, r.status));
+    if (data === null) throw new Error('Бэкенд вернул некорректный ответ');
+
+    return data;
+  }
+
+  // Текст ошибки: сначала подсказка бэкенда, затем статус
+  function errorMessage(data, status) {
+    if (data && (data.detail || data.error)) {
+      const main = data.detail || data.error;
+      return data.hint ? main + ' ' + data.hint : main;
+    }
+    if (status === 404) return 'Ничего не найдено';
+    if (status >= 500) return `Бэкенд не отвечает (${status})`;
+    return `Сервер ответил ${status}`;
   }
 
   return {

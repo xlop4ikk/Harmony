@@ -43,6 +43,18 @@ def add_cors_headers(resp):
     return resp
 
 
+@app.errorhandler(music.SourceError)
+def source_unavailable(err):
+    """Источник (зеркало с музыкой) отклонил запрос — понятный ответ вместо 500."""
+    return jsonify({
+        'error': 'source_unavailable',
+        'detail': str(err),
+        'hint': 'Зеркало отклонило запрос с IP этого сервера. Попробуй ещё раз через '
+                'несколько секунд; если ошибка постоянная только в интернете — '
+                'источник блокирует адреса дата-центров.',
+    }), 502
+
+
 # ---------- Static ----------
 
 @app.route('/')
@@ -79,20 +91,10 @@ def api_stream():
         return Response('Forbidden URL', status=403)
 
     try:
-        headers = dict(music.SESSION.headers)
         # Пробрасываем Range, чтобы работала перемотка в плеере
-        range_header = request.headers.get('Range')
-        if range_header:
-            headers['Range'] = range_header
-
-        upstream = requests.get(
-            url,
-            headers=headers,
-            stream=True,
-            timeout=20,
-            allow_redirects=True,
-        )
-        upstream.raise_for_status()
+        upstream = music.fetch_resource(url, {'Range': request.headers.get('Range')})
+    except music.SourceError as e:
+        return Response(f'Источник недоступен: {e}', status=502)
     except requests.RequestException as e:
         return Response(f'Upstream error: {e}', status=502)
 
@@ -124,8 +126,9 @@ def api_img():
         return Response('Forbidden URL', status=403)
 
     try:
-        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, stream=True, timeout=15)
-        resp.raise_for_status()
+        resp = music.fetch_resource(url)
+    except music.SourceError as e:
+        return Response(str(e), status=502)
     except requests.RequestException as e:
         return Response(str(e), status=502)
 

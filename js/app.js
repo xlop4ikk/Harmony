@@ -206,7 +206,8 @@ function runSearch(q) {
     .then(res => {
       if (seq !== searchSeq) return;            // устаревший ответ
       if (res.error) {
-        box.innerHTML = emptyState('Не получилось', escapeHtml(res.error));
+        box.innerHTML = emptyState('Не получилось',
+          escapeHtml(res.detail || res.error) + (res.hint ? '<br>' + escapeHtml(res.hint) : ''));
         return;
       }
       const trackIds = Store.put(res.tracks);
@@ -214,8 +215,7 @@ function runSearch(q) {
     })
     .catch(err => {
       if (seq !== searchSeq) return;
-      box.innerHTML = emptyState('Нет связи с бэкендом',
-        `Запусти сервер: <b>python server/app.py</b><br>${escapeHtml(err.message)}`);
+      box.innerHTML = emptyState('Ошибка поиска', escapeHtml(err.message));
     });
 }
 
@@ -300,7 +300,8 @@ function renderPage(url) {
     .then(res => {
       if (seq !== pageSeq) return;
       if (res.error) {
-        view.innerHTML = emptyState('Ошибка загрузки', escapeHtml(res.error));
+        view.innerHTML = emptyState('Ошибка загрузки',
+          escapeHtml(res.detail || res.error) + (res.hint ? '<br>' + escapeHtml(res.hint) : ''));
         return;
       }
       const ids = Store.put(res.tracks);
@@ -326,7 +327,7 @@ function renderPage(url) {
     })
     .catch(err => {
       if (seq !== pageSeq) return;
-      view.innerHTML = emptyState('Нет связи с бэкендом', escapeHtml(err.message));
+      view.innerHTML = emptyState('Ошибка загрузки', escapeHtml(err.message));
     });
 }
 

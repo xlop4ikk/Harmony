@@ -1,30 +1,49 @@
 """
-Harmony — парсер rus.hitmotop.com.
+Harmony — парсер музыки.
 
-Поиск: треки, альбомы, исполнители.
-Страницы альбома/артиста: список треков со ссылками на MP3.
+Работает с несколькими зеркалами одного источника: если одно
+отдаёт 403/429/5xx, берётся следующее. Перед первым запросом
+«прогревается» сессия, чтобы получить cookie sid.
 """
 
 import json
 import re
+import time
 from urllib.parse import quote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://rus.hitmotop.com"
+# Зеркала источника. rus.hitmotop.com — основной, ru.hitmoz.org — запасное.
+HOSTS = ('rus.hitmotop.com', 'ru.hitmoz.org')
+BASE_URL = 'https://' + HOSTS[0]
 
 # Хосты, с которых разрешено качать аудио и картинки
 ALLOWED_HOSTS = ('hitmotop.com', 'hitmoz.org', 'hitmcdn.com', 'yandex.net', 'yandex.ru')
 
+_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+       '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36')
+
+# Максимально похожий на браузер набор заголовков: часть зеркал
+# отдаёт 403 запросам без Sec-Fetch-*/sec-ch-ua.
 SESSION = requests.Session()
 SESSION.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                  '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'User-Agent': _UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,'
+              'image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Referer': BASE_URL + '/',
+    'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+    'Cache-Control': 'max-age=0',
 })
+
+_warmed_up = False
 
 
 # ---------------------------------------------------------------- helpers
@@ -150,10 +169,66 @@ def _extract_album_items(soup, kind: str) -> list:
     return out
 
 
+class SourceError(RuntimeError):
+    """Источник музыки недоступен: заблокировал запрос, лимит или сеть."""
+
+
+def _warmup():
+    """Получить cookie sid с главной страницы — часть зеркал без него отдаёт 403."""
+    global _warmed_up
+    if _warmed_up:
+        return
+    for host in HOSTS:
+        try:
+            r = SESSION.get(f'https://{host}/', timeout=15)
+            if r.ok:
+                _warmed_up = True
+                return
+        except requests.RequestException:
+            continue
+
+
+def _candidates(url: str) -> list:
+    """Исходный URL плюс его копии на зеркалах (только для хостов-зеркал)."""
+    parsed = urlparse(url)
+    out = [url]
+    if parsed.netloc in HOSTS:
+        for host in HOSTS:
+            if host != parsed.netloc:
+                out.append(parsed._replace(netloc=host).geturl())
+    return out
+
+
 def _fetch_html(url: str):
-    resp = SESSION.get(url, timeout=20)
-    resp.raise_for_status()
-    return BeautifulSoup(resp.text, 'html.parser')
+    """Загрузить HTML, перебирая зеркала и повторя попытку при блокировке."""
+    _warmup()
+
+    last_err = ''
+    for attempt in range(2):
+        for cand in _candidates(url):
+            try:
+                resp = SESSION.get(cand, timeout=20)
+            except requests.RequestException as e:
+                last_err = f'нет связи с источником ({e.__class__.__name__})'
+                continue
+
+            if resp.status_code == 200:
+                return BeautifulSoup(resp.text, 'html.parser')
+
+            if resp.status_code in (401, 403, 429):
+                last_err = f'источник отклонил запрос (HTTP {resp.status_code})'
+                time.sleep(0.7)
+                continue
+
+            if resp.status_code >= 500:
+                last_err = f'источник недоступен (HTTP {resp.status_code})'
+                continue
+
+            last_err = f'неожиданный ответ (HTTP {resp.status_code})'
+
+        time.sleep(0.4)
+
+    raise SourceError(last_err or 'источник недоступен')
 
 
 # ---------------------------------------------------------------- public API
@@ -206,6 +281,32 @@ def page(url: str) -> dict:
     }
 
 
-def proxy_headers(url: str) -> dict:
-    """Заголовки для проксирования аудио/картинки."""
-    return {'Referer': BASE_URL + '/', 'User-Agent': SESSION.headers['User-Agent']}
+def fetch_resource(url: str, extra_headers: dict = None, stream: bool = True):
+    """Отдать mp3 или картинку, перебирая зеркала при блокировке.
+
+    Возвращает requests.Response с успешным статусом (200/206).
+    """
+    headers = {
+        'Referer': BASE_URL + '/',
+        'User-Agent': _UA,
+        'Accept': '*/*',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+    }
+    if extra_headers:
+        headers.update({k: v for k, v in extra_headers.items() if v})
+
+    last_code = None
+    for cand in _candidates(url):
+        try:
+            resp = SESSION.get(cand, headers=headers, stream=stream,
+                               timeout=30, allow_redirects=True)
+        except requests.RequestException:
+            continue
+
+        if resp.status_code in (200, 206):
+            return resp
+
+        last_code = resp.status_code
+        resp.close()
+
+    raise SourceError(f'источник не отдал файл (HTTP {last_code or "нет связи"})')
