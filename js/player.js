@@ -21,6 +21,8 @@ const Player = (() => {
 
   const _listeners = [];
   let _timer = null;
+  let _errorStreak = 0;          // сколько треков подряд не удалось загрузить
+  let _expectedSrc = null;       // src текущего трека, чтобы игнорировать устаревшие ошибки
 
   function emit() {
     for (const f of _listeners) f(state);
@@ -34,6 +36,7 @@ const Player = (() => {
 
   audio.addEventListener('loadedmetadata', () => {
     state.dur = audio.duration;
+    _errorStreak = 0;            // трек загрузился — счётчик ошибок сбрасываем
     emit();
   });
 
@@ -48,12 +51,34 @@ const Player = (() => {
 
   audio.addEventListener('play', () => { state.playing = true; emit(); });
   audio.addEventListener('pause', () => { state.playing = false; emit(); });
+
+  // Ошибка загрузки аудио (upstream недоступен, 404, битый файл).
+  // Пропускаем трек, предупреждаем пользователя, защищаемся от бесконечного цикла.
   audio.addEventListener('error', () => {
-    // Some upstream streams fail — skip to next
-    if (state.playing) {
-      state.playing = false;
-      _next(true);
+    const src = audio.src;
+    if (_expectedSrc && src !== _expectedSrc) return;   // устаревшее событие от предыдущего трека
+
+    const t = Store.get(state.ids[state.idx]);
+    state.playing = false;
+    _errorStreak++;
+
+    if (_errorStreak >= 4) {
+      // Слишком много ошибок подряд — скорее всего, проблема с бэкендом, а не с одним треком
+      _errorStreak = 0;
+      stop();
+      emit();
+      if (typeof toast === 'function') {
+        toast(API.base
+          ? 'Бэкенд не отвечает. Проверь адрес в js/config.js.'
+          : 'Не удалось загрузить звук. Запусти сервер: python server/app.py');
+      }
+      return;
     }
+
+    if (typeof toast === 'function' && t) {
+      toast(`«${t.title}» не загрузился — пропускаем`);
+    }
+    _next(true);
   });
 
   // ---- helpers ----
@@ -93,6 +118,7 @@ const Player = (() => {
     if (!t) { stop(); state.playing = false; emit(); return; }
     state.idx = i;
     const src = API.stream(t.url);
+    _expectedSrc = src;
     audio.src = src;
     audio.load();
     state.dur = 0;
