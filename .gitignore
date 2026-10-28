@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Логи и временные файлы
+*.log
+server.log
+server.err
+
+# ОС / редакторы
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
